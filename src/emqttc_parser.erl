@@ -80,6 +80,9 @@ parse_remaining_len(<<0:1, Len:7, Rest/binary>>, Header,  Multiplier, Value) ->
 
 parse_frame(Bin, #mqtt_packet_header{type = Type,
                                      qos  = Qos} = Header, Length) ->
+    TypeList = [?CONNECT, ?CONNACK, ?PUBLISH, ?PUBACK, ?PUBREC, ?PUBREL, ?PUBCOMP, ?SUBACK, ?UNSUBACK, ?PINGRESP],
+    case lists:member(Type, TypeList) of
+        true ->
     case {Type, Bin} of
         %{?CONNECT, <<FrameBin:Length/binary, Rest/binary>>} ->
         %    {ProtoName, Rest1} = parse_utf(FrameBin),
@@ -177,6 +180,8 @@ parse_frame(Bin, #mqtt_packet_header{type = Type,
                 parse_frame(<<TooShortBin/binary, BinMore/binary>>,
                     Header, Length)
             end}
+    end;
+        _ -> {error, wrong_packet}
     end.
 
 wrap(Header, Variable, Payload, Rest) ->
@@ -220,4 +225,3 @@ bool(1) -> true.
 
 %protocol_name_approved(Ver, Name) ->
 %    lists:member({Ver, Name}, ?PROTOCOL_NAMES).
-

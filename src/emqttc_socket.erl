@@ -83,7 +83,7 @@ connect(ClientPid, Transport, Host, Port, TcpOpts, SslOpts) when is_pid(ClientPi
     end.
 
 -spec connect(Transport, Host, Port, TcpOpts, SslOpts) -> {ok, Socket} | {error, any()} when
-    Transport   :: tcp | ssl,
+    Transport   :: tcp | ssl | wss,
     Host        :: inet:ip_address() | string(),
     Port        :: inet:port_number(),
     TcpOpts     :: [gen_tcp:connect_option()],
@@ -100,7 +100,12 @@ connect(ssl, Host, Port, TcpOpts, SslOpts) ->
             end;
         {error, Reason} ->
             {error, Reason}
-    end.
+    end;
+connect(wss, Host, _Port, TcpOpts, _SslOpts) ->
+    io:format("TcpOpts are ~p~n", [TcpOpts]),
+    {ok, {Socket, _Pid}} = emqttc_wss_handler:start_link(Host, TcpOpts),
+    SslSocket = #ssl_socket{tcp = wss, ssl = Socket},
+    {ok, SslSocket}.
 
 %%------------------------------------------------------------------------------
 %% @doc Socket controlling process
@@ -115,11 +120,13 @@ controlling_process(#ssl_socket{ssl = SslSocket}, Pid) ->
 %% @doc Send Packet and Data
 %% @end
 %%------------------------------------------------------------------------------
--spec send(Socket, Data) -> ok when 
+-spec send(Socket, Data) -> ok when
     Socket  :: inet:socket() | ssl_socket(),
     Data    :: binary().
 send(Socket, Data) when is_port(Socket) ->
     gen_tcp:send(Socket, Data);
+send(#ssl_socket{tcp = wss}, {Name, Data}) ->
+    emqttc_wss_handler:websocket_send(Name, Data);
 send(#ssl_socket{ssl = SslSocket}, Data) ->
     ssl:send(SslSocket, Data).
 
@@ -154,14 +161,17 @@ setopts(#ssl_socket{ssl = SslSocket}, Opts) ->
 %% @doc Get socket stats.
 %% @end
 %%------------------------------------------------------------------------------
--spec getstat(Socket, Stats) -> {ok, Values} | {error, any()} when 
+-spec getstat(Socket, Stats) -> {ok, Values} | {error, any()} when
     Socket  :: inet:socket() | ssl_socket(),
     Stats   :: list(),
     Values  :: list().
 getstat(Socket, Stats) when is_port(Socket) ->
     inet:getstat(Socket, Stats);
-getstat(#ssl_socket{tcp = Socket}, Stats) -> 
+getstat(#ssl_socket{tcp = wss, ssl = _Socket}, _Stats) ->
+    {ok, [{keepalive, 90}]};
+getstat(#ssl_socket{tcp = Socket}, Stats) ->
     inet:getstat(Socket, Stats).
+
 
 %%------------------------------------------------------------------------------
 %% @doc Socket name.
@@ -212,6 +222,8 @@ receiver_loop(ClientPid, Socket, ParseState) ->
             case parse_received_bytes(ClientPid, Data, ParseState) of
                 {ok, NewParserState} ->
                     receiver_activate(ClientPid, Socket, NewParserState);
+                {error, wrong_packet} ->
+                    receiver_activate(ClientPid, Socket, ParseState);
                 {error, Error} ->
                     gen_fsm:send_all_state_event(ClientPid, {frame_error, Error})
             end;
@@ -219,8 +231,11 @@ receiver_loop(ClientPid, Socket, ParseState) ->
             connection_lost(ClientPid, {ssl_error, Reason});
         {ssl_closed, _SslSocket} ->
             connection_lost(ClientPid, ssl_closed);
-        stop -> 
-            close(Socket)
+        stop ->
+            close(Socket);
+        Other ->
+            io:format("received other ~p~n", [Other]),
+            receiver_activate(ClientPid, Socket, ParseState)
     end.
 
 parse_received_bytes(_ClientPid, <<>>, ParseState) ->
@@ -230,7 +245,7 @@ parse_received_bytes(ClientPid, Data, ParseState) ->
     case catch emqttc_parser:parse(Data, ParseState) of
     {more, ParseState1} ->
         {ok, ParseState1};
-    {ok, Packet, Rest} -> 
+    {ok, Packet, Rest} ->
         gen_fsm:send_event(ClientPid, Packet),
         parse_received_bytes(ClientPid, Rest, emqttc_parser:new());
     {error, Error} ->
