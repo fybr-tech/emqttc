@@ -111,7 +111,7 @@
                 puback_timeout      :: pos_integer(),
                 suback_timeout      :: pos_integer(),
                 connack_tref        :: reference(),
-                transport = tcp     :: tcp | ssl,
+                transport	          :: tcp | ssl | wss,
                 reconnector         :: emqttc_reconnector:reconnector() | undefined,
                 logger              :: gen_logger:logmod(),
                 tcp_opts            :: [gen_tcp:connect_option()],
@@ -165,7 +165,12 @@ start_link(MqttOpts) when is_list(MqttOpts) ->
 start_link(Name, MqttOpts) when is_atom(Name), is_list(MqttOpts) ->
     start_link(Name, MqttOpts, []);
 start_link(MqttOpts, TcpOpts) when is_list(MqttOpts), is_list(TcpOpts) ->
-    gen_fsm:start_link(?MODULE, [undefined, self(), MqttOpts, TcpOpts], []).
+    Parent = case proplists:get_value(parent, MqttOpts) of
+        undefined -> self();
+        Pid -> Pid
+    end,
+    Name = proplists:get_value(name, MqttOpts),
+    gen_fsm:start_link(?MODULE, [Name, Parent, MqttOpts, TcpOpts], []).
 
 %%------------------------------------------------------------------------------
 %% @doc Start emqttc client with name, options, tcp options.
@@ -374,7 +379,17 @@ init([undefined, Parent, MqttOpts, TcpOpts]) ->
 init([Name, Parent, MqttOpts, TcpOpts]) ->
 
     process_flag(trap_exit, true),
-
+    Host = case proplists:get_value(host, MqttOpts) of
+        HostVal when is_list(HostVal) ->
+	    HostVal;
+        _ -> "tcphost"
+    end,
+    case string:str(Host, "wss://") of
+      	1 ->
+            ets:new(wss_socket_map, [set, named_table, public, {read_concurrency, true}, {write_concurrency, true}]);
+      	0 ->
+            ok
+    end,
     Logger = gen_logger:new(get_value(logger, MqttOpts, {console, debug})),
 
     MqttOpts1 = proplists:delete(logger, MqttOpts),
@@ -385,7 +400,8 @@ init([Name, Parent, MqttOpts, TcpOpts]) ->
     end,
 
     ProtoState = emqttc_protocol:init(
-                   emqttc_opts:merge([{logger, Logger},
+                   emqttc_opts:merge([{name, Name},
+				      {logger, Logger},
                                       {keepalive, ?KEEPALIVE}], MqttOpts1)),
 
     State = init(MqttOpts1, #state{name            = Name,
@@ -406,7 +422,15 @@ init([Name, Parent, MqttOpts, TcpOpts]) ->
 init([], State) ->
     State;
 init([{host, Host} | Opts], State) ->
-    init(Opts, State#state{host = Host});
+    Transport = case string:str(Host, "wss://") of
+      	1 -> wss;
+      	0 ->
+            case (lists:member(ssl, Opts) orelse is_tuple(proplists:lookup(ssl, Opts))) of
+      		      true -> ssl;
+      		      _ -> tcp
+      	    end
+    end,
+    init(Opts, State#state{host = Host, transport = Transport});
 init([{port, Port} | Opts], State) ->
     init(Opts, State#state{port = Port});
 init([ssl | Opts], State) ->
@@ -929,9 +953,13 @@ connect(State = #state{name = Name,
                        tcp_opts = TcpOpts,
                        ssl_opts = SslOpts}) ->
     Logger:info("[Client ~s]: connecting to ~s:~p", [Name, Host, Port]),
-    case emqttc_socket:connect(self(), Transport, Host, Port, TcpOpts, SslOpts) of
+    UpdatedTcpOpts = [{name, Name} | TcpOpts],
+    case emqttc_socket:connect(self(), Transport, Host, Port, UpdatedTcpOpts, SslOpts) of
         {ok, Socket, Receiver} ->
-            ProtoState1 = emqttc_protocol:set_socket(ProtoState, Socket),
+            ProtoState1 = case Transport of
+                wss -> ProtoState;
+                _ -> emqttc_protocol:set_socket(ProtoState, Socket)
+            end,
             emqttc_protocol:connect(ProtoState1),
             KeepAlive = emqttc_keepalive:new({Socket, send_oct}, KeepAliveTime, {keepalive, timeout}),
             TRef = gen_fsm:start_timer(ConnAckTimeout*1000, connack),

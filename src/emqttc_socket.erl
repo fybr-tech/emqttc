@@ -55,6 +55,8 @@
 
 -record(ssl_socket, {tcp, ssl}).
 
+-record(wss_socket, {pid}).
+
 -type ssl_socket() :: #ssl_socket{}.
 
 -define(IS_SSL(Socket), is_record(Socket, ssl_socket)).
@@ -76,14 +78,20 @@ connect(ClientPid, Transport, Host, Port, TcpOpts, SslOpts) when is_pid(ClientPi
     case connect(Transport, Host, Port, TcpOpts, SslOpts) of
         {ok, Socket} ->
             ReceiverPid = spawn_link(?MODULE, receiver, [ClientPid, Socket]),
-            controlling_process(Socket, ReceiverPid),
+            case Transport of
+		wss -> 
+		    Name = proplists:get_value(name, TcpOpts),
+		    ets:insert(wss_socket_map, {Name, ReceiverPid});
+		_ ->
+		    controlling_process(Socket, ReceiverPid)
+	    end,
             {ok, Socket, ReceiverPid};
         {error, Reason} ->
             {error, Reason}
     end.
 
 -spec connect(Transport, Host, Port, TcpOpts, SslOpts) -> {ok, Socket} | {error, any()} when
-    Transport   :: tcp | ssl,
+    Transport   :: tcp | ssl | wss,
     Host        :: inet:ip_address() | string(),
     Port        :: inet:port_number(),
     TcpOpts     :: [gen_tcp:connect_option()],
@@ -100,7 +108,11 @@ connect(ssl, Host, Port, TcpOpts, SslOpts) ->
             end;
         {error, Reason} ->
             {error, Reason}
-    end.
+    end;
+connect(wss, Host, _Port, TcpOpts, _SslOpts) ->
+    {ok,  Pid} = emqttc_wss_handler:start_link(Host, TcpOpts),
+    WssSocket = #wss_socket{pid = Pid},
+    {ok, WssSocket}.
 
 %%------------------------------------------------------------------------------
 %% @doc Socket controlling process
@@ -121,7 +133,9 @@ controlling_process(#ssl_socket{ssl = SslSocket}, Pid) ->
 send(Socket, Data) when is_port(Socket) ->
     gen_tcp:send(Socket, Data);
 send(#ssl_socket{ssl = SslSocket}, Data) ->
-    ssl:send(SslSocket, Data).
+    ssl:send(SslSocket, Data);
+send(undefined, {Name, Data}) ->
+    emqttc_wss_handler:websocket_send(Name, Data).
 
 %%------------------------------------------------------------------------------
 %% @doc Close Socket.
@@ -160,6 +174,8 @@ setopts(#ssl_socket{ssl = SslSocket}, Opts) ->
     Values  :: list().
 getstat(Socket, Stats) when is_port(Socket) ->
     inet:getstat(Socket, Stats);
+getstat(Socket, Stats) when is_record(Socket, wss_socket) ->
+    {ok, [{hd(Stats), ?TIMEOUT div 1000}]};
 getstat(#ssl_socket{tcp = Socket}, Stats) -> 
     inet:getstat(Socket, Stats).
 
@@ -192,7 +208,10 @@ receiver(ClientPid, Socket) ->
     receiver_activate(ClientPid, Socket, emqttc_parser:new()).
 
 receiver_activate(ClientPid, Socket, ParseState) ->
-    setopts(Socket, [{active, once}]),
+    case is_record(Socket, wss_socket) of
+	true -> ok;
+	false -> setopts(Socket, [{active, once}])
+    end,
     erlang:hibernate(?MODULE, receiver_loop, [ClientPid, Socket, ParseState]).
 
 receiver_loop(ClientPid, Socket, ParseState) ->
@@ -220,7 +239,14 @@ receiver_loop(ClientPid, Socket, ParseState) ->
         {ssl_closed, _SslSocket} ->
             connection_lost(ClientPid, ssl_closed);
         stop -> 
-            close(Socket)
+            close(Socket);
+        {wss, Data} ->
+            case parse_received_bytes(ClientPid, Data, ParseState) of
+                {ok, NewParserState} ->
+                    receiver_activate(ClientPid, Socket, NewParserState);
+                {error, Error} ->
+                    gen_fsm:send_all_state_event(ClientPid, {frame_error, Error})
+            end
     end.
 
 parse_received_bytes(_ClientPid, <<>>, ParseState) ->

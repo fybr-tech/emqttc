@@ -53,6 +53,7 @@
         proto_ver  = 4          :: mqtt_vsn(),
         proto_name = <<"MQTT">> :: binary(),
         client_id               :: binary(),
+        name                    :: list(),
         clean_sess = true       :: boolean(),
         keepalive  = ?KEEPALIVE :: non_neg_integer(),
         will_flag  = false      :: boolean(),
@@ -106,6 +107,8 @@ init([{will, WillOpts} | Opts], State = #proto_state{will_msg = WillMsg}) ->
                                  will_msg  = init_willmsg(WillOpts, WillMsg)});
 init([{logger, Logger} | Opts], State) ->
     init(Opts, State#proto_state{logger = Logger});
+init([{name, Name} | Opts], State) ->
+    init(Opts, State#proto_state{name = Name});
 init([_Opt | Opts], State) ->
     init(Opts, State).
 
@@ -319,8 +322,12 @@ send(Packet, State = #proto_state{socket = Socket, logger = Logger}) ->
     LogTag = logtag(State),
     Logger:debug("[~s] SENT: ~s", [LogTag, emqttc_packet:dump(Packet)]),
     Data = emqttc_serialiser:serialise(Packet),
-    Logger:debug("[~s] SENT: ~p", [LogTag, Data]),
-    emqttc_socket:send(Socket, Data),
+    Name = State#proto_state.name,
+    case Socket of
+        undefined ->
+            emqttc_socket:send(Socket, {Name, Data});
+        _ -> emqttc_socket:send(Socket, Data)
+    end,
     {ok, State}.
 
 next_packet_id(State = #proto_state{packet_id = 16#ffff}) ->
