@@ -67,10 +67,10 @@
 %%------------------------------------------------------------------------------
 -spec connect(ClientPid, Transport, Host, Port, TcpOpts, SslOpts) -> {ok, Socket, Receiver} | {error, term()} when
     ClientPid   :: pid(),
-    Transport   :: tcp | ssl,
+    Transport   :: tcp | ssl | wss,
     Host        :: inet:ip_address() | string(),
     Port        :: inet:port_number(),
-    TcpOpts     :: [gen_tcp:connect_option()],
+    TcpOpts     :: [gen_tcp:connect_option() | tuple()],
     SslOpts     :: [ssl:ssloption()],
     Socket      :: inet:socket() | ssl_socket(),
     Receiver    :: pid().
@@ -98,9 +98,11 @@ connect(ClientPid, Transport, Host, Port, TcpOpts, SslOpts) when is_pid(ClientPi
     SslOpts     :: [ssl:ssloption()],
     Socket      :: inet:socket() | ssl_socket().
 connect(tcp, Host, Port, TcpOpts, _SslOpts) ->
-    gen_tcp:connect(Host, Port, emqttc_opts:merge(?TCPOPTIONS, TcpOpts), ?TIMEOUT);
+    ModTcpOpts = proplists:delete(name, TcpOpts),
+    gen_tcp:connect(Host, Port, emqttc_opts:merge(?TCPOPTIONS, ModTcpOpts), ?TIMEOUT);
 connect(ssl, Host, Port, TcpOpts, SslOpts) ->
-    case gen_tcp:connect(Host, Port, emqttc_opts:merge(?TCPOPTIONS, TcpOpts), ?TIMEOUT) of
+    ModTcpOpts = proplists:delete(name, TcpOpts),
+    case gen_tcp:connect(Host, Port, emqttc_opts:merge(?TCPOPTIONS, ModTcpOpts), ?TIMEOUT) of
         {ok, Socket} ->
             case ssl:connect(Socket, emqttc_opts:merge(?SSLOPTIONS, SslOpts), ?TIMEOUT) of
                 {ok, SslSocket} -> {ok, #ssl_socket{tcp = Socket, ssl = SslSocket}};
