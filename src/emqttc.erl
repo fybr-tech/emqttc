@@ -379,17 +379,24 @@ init([undefined, Parent, MqttOpts, TcpOpts]) ->
 init([Name, Parent, MqttOpts, TcpOpts]) ->
 
     process_flag(trap_exit, true),
+
     Host = case proplists:get_value(host, MqttOpts) of
         HostVal when is_list(HostVal) ->
 	    HostVal;
         _ -> "tcphost"
     end,
+
     case string:str(Host, "wss://") of
       	1 ->
-            ets:new(wss_socket_map, [set, named_table, public, {read_concurrency, true}, {write_concurrency, true}]);
+            try ets:new(websocket_map, [set, named_table, public, {read_concurrency, true}, {write_concurrency, true}]) of
+              TableName -> TableName
+            catch
+                _:_ -> ok
+            end;
       	0 ->
             ok
     end,
+
     Logger = gen_logger:new(get_value(logger, MqttOpts, {console, debug})),
 
     MqttOpts1 = proplists:delete(logger, MqttOpts),

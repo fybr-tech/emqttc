@@ -57,6 +57,8 @@
 
 -record(wss_socket, {pid}).
 
+-record(wss_comm_handler, {tx_pid, rx_pid}).
+
 -type ssl_socket() :: #ssl_socket{}.
 
 -define(IS_SSL(Socket), is_record(Socket, ssl_socket)).
@@ -79,15 +81,16 @@ connect(ClientPid, Transport, Host, Port, TcpOpts, SslOpts) when is_pid(ClientPi
         {ok, Socket} ->
             ReceiverPid = spawn_link(?MODULE, receiver, [ClientPid, Socket]),
             case Transport of
-		wss -> 
-		    Name = proplists:get_value(name, TcpOpts),
-		    ets:insert(wss_socket_map, {Name, ReceiverPid});
-		_ ->
-		    controlling_process(Socket, ReceiverPid)
-	    end,
-            {ok, Socket, ReceiverPid};
+                wss ->
+                    Name = proplists:get_value(name, TcpOpts),
+                    CommHandler = #wss_comm_handler{tx_pid = Socket#wss_socket.pid, rx_pid = ReceiverPid},
+                    ets:insert(websocket_map, {Name, CommHandler});
+                _ ->
+                    controlling_process(Socket, ReceiverPid)
+            end,
+	          {ok, Socket, ReceiverPid};
         {error, Reason} ->
-            {error, Reason}
+	          {error, Reason}
     end.
 
 -spec connect(Transport, Host, Port, TcpOpts, SslOpts) -> {ok, Socket} | {error, any()} when
